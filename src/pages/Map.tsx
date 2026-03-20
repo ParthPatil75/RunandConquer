@@ -39,9 +39,7 @@ function LocationTracker({ onLocation }: { onLocation: (pos:[number,number]) => 
       onLocation([e.latlng.lat, e.latlng.lng]);
       map.panTo(e.latlng);
     });
-    map.on('locationerror', (e) => {
-      console.log('GPS error:', e.message);
-    });
+    map.on('locationerror', (e) => { console.log('GPS error:', e.message); });
     return () => { map.stopLocate(); };
   }, [map]);
   return null;
@@ -55,6 +53,7 @@ export default function Map() {
   const [roadsLoaded, setRoadsLoaded] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [runPath, setRunPath] = useState<[number,number][]>([]);
+  const [botTrails, setBotTrails] = useState<Record<string,[number,number][]>>({});
   const [distance, setDistance] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [startTime, setStartTime] = useState<number|null>(null);
@@ -74,14 +73,15 @@ export default function Map() {
   const userRef = useRef<User|null>(null);
   const adjRef = useRef<Record<string,string[]>>({});
   const timerRef = useRef<ReturnType<typeof setInterval>|null>(null);
+  const botPathsRef = useRef<Record<string,[number,number][]>>({});
+  const botCurrentNodeRef = useRef<Record<string,string>>({});
+  const botVisitedRef = useRef<Record<string,string[]>>({});
 
   useEffect(() => {
     const u = getCurrentUser();
     if (!u) { navigate('/'); return; }
     setUser(u); userRef.current = u;
     fetchRoads();
-
-    // Listen to Firebase for other players territories in real-time
     const unsub = subscribeToTerritories((firebaseTerritories) => {
       setTerritories(current => {
         const mine = current.filter(t => t.owner === userRef.current?.id);
@@ -129,16 +129,13 @@ export default function Map() {
         ]);
       }
       setRoadsLoaded(true);
-    } catch(e) {
-      setRoadsLoaded(true);
-    }
+    } catch(e) { setRoadsLoaded(true); }
   };
 
   const findStartNode = ():string => {
     const nodes = Object.keys(adjRef.current);
     if (!nodes.length) return `${CAMPUS_CENTER[0]},${CAMPUS_CENTER[1]}`;
-    let best = nodes[0];
-    let bestDist = Infinity;
+    let best = nodes[0]; let bestDist = Infinity;
     for (const k of nodes) {
       const [la,ln] = k.split(',').map(Number);
       const d = Math.abs(la-CAMPUS_CENTER[0]) + Math.abs(ln-CAMPUS_CENTER[1]);
@@ -154,11 +151,8 @@ export default function Map() {
       if (poly.length >= 3) {
         const u = userRef.current!;
         const newTerritory = {
-          id:`t_${Date.now()}`,
-          owner: u.id,
-          ownerName: u.name,
-          color: PLAYER_COLOR,
-          polygon: poly,
+          id:`t_${Date.now()}`, owner:u.id, ownerName:u.name,
+          color:PLAYER_COLOR, polygon:poly,
         };
         setTerritories(t => [...t, newTerritory]);
         capturedRef.current += 1;
@@ -197,37 +191,86 @@ export default function Map() {
     if (!isRunning || !startTime || gpsMode) return;
     const adj = adjRef.current;
     const botNames:Record<string,string> = { bot1:'Alex', bot2:'Sarah', bot3:'Mike' };
+
+    // Initialize bots at different road nodes
+    const allNodes = Object.keys(adj);
+    if (allNodes.length > 0) {
+      ['bot1','bot2','bot3'].forEach((botId, i) => {
+        if (!botCurrentNodeRef.current[botId]) {
+          const startIdx = Math.floor((allNodes.length / 4) * (i + 1));
+          const startNode = allNodes[startIdx] || allNodes[0];
+          const [la,ln] = startNode.split(',').map(Number);
+          botCurrentNodeRef.current[botId] = startNode;
+          botPathsRef.current[botId] = [[la,ln]];
+          botVisitedRef.current[botId] = [startNode];
+        }
+      });
+    }
+
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now()-startTime)/1000));
       setDistance(p => p+0.008);
+
+      // Player movement
       const cur = currentNodeRef.current;
       const neighbors = adj[cur] || [];
-      if (!neighbors.length) return;
-      const next = neighbors[Math.floor(Math.random()*neighbors.length)];
-      const [la,ln] = next.split(',').map(Number);
-      const newPos:[number,number] = [la,ln];
-      const newPath = [...pathRef.current, newPos];
-      pathRef.current = newPath;
-      setRunPath([...newPath]);
-      handleCapture(newPos, newPath);
-      currentNodeRef.current = next;
+      if (neighbors.length) {
+        const next = neighbors[Math.floor(Math.random()*neighbors.length)];
+        const [la,ln] = next.split(',').map(Number);
+        const newPos:[number,number] = [la,ln];
+        const newPath = [...pathRef.current, newPos];
+        pathRef.current = newPath;
+        setRunPath([...newPath]);
+        handleCapture(newPos, newPath);
+        currentNodeRef.current = next;
+      }
+
+      // Bot movement on real roads
       ['bot1','bot2','bot3'].forEach(botId => {
-        if (Math.random() > 0.97) {
-          const nodes = Object.keys(adj);
-          if (nodes.length < 3) return;
-          const rIdx = Math.floor(Math.random()*(nodes.length-3));
-          const poly = [nodes[rIdx],nodes[rIdx+1],nodes[rIdx+2]]
-            .map(n => n.split(',').map(Number)) as [number,number][];
-          setTerritories(t => [...t, {
-            id:`tb_${botId}_${Date.now()}`, owner:botId,
-            ownerName:botNames[botId], color:BOT_COLORS[botId], polygon:poly
-          }]);
-          setToastType('warning');
-          setToast(`⚠️ ${botNames[botId]} captured an area!`);
-          setTimeout(()=>setToast(''),2500);
+        const curNode = botCurrentNodeRef.current[botId];
+        if (!curNode) return;
+        const botNeighbors = adj[curNode] || [];
+        if (!botNeighbors.length) return;
+
+        // Prefer unvisited roads like a real runner exploring
+        const visited = botVisitedRef.current[botId] || [];
+        const unvisited = botNeighbors.filter(n => !visited.includes(n));
+        const nextNode = unvisited.length > 0
+          ? unvisited[Math.floor(Math.random() * unvisited.length)]
+          : botNeighbors[Math.floor(Math.random() * botNeighbors.length)];
+
+        const [bLa,bLn] = nextNode.split(',').map(Number);
+        const newBotPos:[number,number] = [bLa, bLn];
+        const currentBotPath = botPathsRef.current[botId] || [];
+        const newBotPath = [...currentBotPath, newBotPos];
+        botPathsRef.current[botId] = newBotPath;
+        botCurrentNodeRef.current[botId] = nextNode;
+        botVisitedRef.current[botId] = [...visited.slice(-50), nextNode];
+
+        // Update bot trail on map
+        setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-30)}));
+
+        // Check if bot path loops → capture territory
+        const crossIdx = findIntersectionIdx(newBotPath);
+        if (crossIdx >= 0) {
+          const poly = newBotPath.slice(crossIdx) as [number,number][];
+          if (poly.length >= 3) {
+            setTerritories(t => [...t, {
+              id:`tb_${botId}_${Date.now()}`, owner:botId,
+              ownerName:botNames[botId], color:BOT_COLORS[botId], polygon:poly
+            }]);
+            setToastType('warning');
+            setToast(`⚠️ ${botNames[botId]} captured an area!`);
+            setTimeout(()=>setToast(''),2500);
+            // Reset bot path
+            botPathsRef.current[botId] = [newBotPos];
+            botVisitedRef.current[botId] = [nextNode];
+            setBotTrails(prev => ({...prev, [botId]: [newBotPos]}));
+          }
         }
       });
     }, 800);
+
     timerRef.current = interval;
     return () => clearInterval(interval);
   }, [isRunning, startTime, gpsMode]);
@@ -244,6 +287,11 @@ export default function Map() {
     currentNodeRef.current = start;
     pathRef.current = [[la,ln]];
     capturedRef.current = 0;
+    // Reset bots
+    botPathsRef.current = {};
+    botCurrentNodeRef.current = {};
+    botVisitedRef.current = {};
+    setBotTrails({});
     setIsRunning(true); setStartTime(Date.now());
     setRunPath([[la,ln]]); setDistance(0); setElapsed(0); setCaptured(0);
     setGpsMode(useGPS); setGpsError('');
@@ -252,7 +300,7 @@ export default function Map() {
 
   const stopRun = () => {
     const fd=distance, ft=elapsed, fc=capturedRef.current;
-    setIsRunning(false); setRunPath([]);
+    setIsRunning(false); setRunPath([]); setBotTrails({});
     if (watchIdRef.current !== null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
     if (timerRef.current) clearInterval(timerRef.current);
     setGpsMode(false);
@@ -282,6 +330,15 @@ export default function Map() {
         {gpsMode && <LocationTracker onLocation={handleGPSLocation}/>}
         {roads.map(r=>(<Polyline key={r.id} positions={r.coords} pathOptions={{color:'#ffffff',weight:1.5,opacity:0.3,dashArray:'4 4'}}/>))}
         {territories.map(t=>(<Polygon key={t.id} positions={t.polygon} pathOptions={{color:t.color,fillColor:t.color,fillOpacity:0.4,weight:2}}/>))}
+
+        {/* Bot trails on real roads */}
+        {Object.entries(botTrails).map(([botId, trail]) =>
+          trail.length > 1 ? (
+            <Polyline key={`trail_${botId}`} positions={trail}
+              pathOptions={{color:BOT_COLORS[botId], weight:3, opacity:0.7, dashArray:'6 3'}}/>
+          ) : null
+        )}
+
         {myLocation && (<Polygon positions={[[myLocation[0]+0.00005,myLocation[1]],[myLocation[0],myLocation[1]+0.00005],[myLocation[0]-0.00005,myLocation[1]],[myLocation[0],myLocation[1]-0.00005]]} pathOptions={{color:'#39d353',fillColor:'#39d353',fillOpacity:1,weight:2}}/>)}
         {runPath.length>1 && (<Polyline positions={runPath} pathOptions={{color:'#39d353',weight:4,opacity:0.9}}/>)}
       </MapContainer>
@@ -359,3 +416,10 @@ export default function Map() {
     </div>
   );
 }
+```
+
+Press **Ctrl+S** → then push to Vercel:
+```
+git add .
+git commit -m "bots follow real roads like real runners"
+git push
