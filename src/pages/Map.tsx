@@ -30,9 +30,22 @@ const segmentsIntersect = (p1:[number,number],p2:[number,number],p3:[number,numb
 };
 
 const findIntersectionIdx = (path:[number,number][]):number => {
-  if(path.length<5) return -1;
+  if(path.length<6) return -1;
   const last=path[path.length-1], prev=path[path.length-2];
-  for(let i=0;i<path.length-4;i++) if(segmentsIntersect(prev,last,path[i],path[i+1])) return i;
+  for(let i=0;i<path.length-5;i++) if(segmentsIntersect(prev,last,path[i],path[i+1])) return i;
+  return -1;
+};
+
+// Also check if path forms a closed loop by proximity
+const findLoopIdx = (path:[number,number][]):number => {
+  if(path.length < 8) return -1;
+  const last = path[path.length-1];
+  for(let i=0;i<path.length-7;i++){
+    const dx = last[0]-path[i][0];
+    const dy = last[1]-path[i][1];
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    if(dist < 0.0003) return i; // ~30 meters threshold
+  }
   return -1;
 };
 
@@ -168,7 +181,10 @@ export default function Map() {
   };
 
   const handleCapture = (newPos:[number,number], path:[number,number][]):boolean => {
-    const idx = findIntersectionIdx(path);
+    const sliced = path.slice(-80);
+    const intersectIdx = findIntersectionIdx(sliced);
+    const loopIdx = findLoopIdx(sliced);
+    const idx = intersectIdx >= 0 ? intersectIdx : loopIdx;
     if (idx >= 0) {
       const poly = path.slice(idx) as [number,number][];
       if (poly.length >= 3) {
@@ -276,8 +292,11 @@ export default function Map() {
         // Show last 40 points of bot trail
         setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-40)}));
 
-         // Check if bot path crossed itself → capture territory
-        const crossIdx = findIntersectionIdx(newBotPath.slice(-60));
+         // Check if bot path forms a loop → capture territory
+        const slicedPath = newBotPath.slice(-80);
+        const crossIdx = findIntersectionIdx(slicedPath) >= 0
+          ? findIntersectionIdx(slicedPath)
+          : findLoopIdx(slicedPath);
         if (crossIdx >= 0) {
           const poly = newBotPath.slice(crossIdx) as [number,number][];
           if (poly.length >= 3) {
