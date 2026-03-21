@@ -276,8 +276,8 @@ export default function Map() {
         // Show last 40 points of bot trail
         setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-40)}));
 
-        // Check if bot path crossed itself → capture territory
-        const crossIdx = findIntersectionIdx(newBotPath);
+         // Check if bot path crossed itself → capture territory
+        const crossIdx = findIntersectionIdx(newBotPath.slice(-60));
         if (crossIdx >= 0) {
           const poly = newBotPath.slice(crossIdx) as [number,number][];
           if (poly.length >= 3) {
@@ -294,7 +294,7 @@ export default function Map() {
           }
         }
       });
-    }, 800);
+    }, 2000);
 
     timerRef.current = interval;
     return () => clearInterval(interval);
@@ -307,6 +307,8 @@ export default function Map() {
   }, [isRunning, gpsMode, startTime]);
 
   const startRun = (useGPS = false) => {
+    // Clear all old bot territories
+    setTerritories([]);
     const startNode = findClosestNode(CAMPUS_CENTER);
     const { nodes } = graphRef.current;
     const startPos = nodes[startNode] || CAMPUS_CENTER;
