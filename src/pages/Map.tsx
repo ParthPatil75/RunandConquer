@@ -14,6 +14,12 @@ const BBOX = '18.488,74.018,18.500,74.032';
 interface RoadWay { id: number; coords: [number,number][] }
 interface Territory { id:string; owner:string; ownerName:string; polygon:[number,number][]; color:string; }
 
+// Road segment graph — connects every consecutive point on every road
+interface RoadGraph {
+  nodes: Record<string,[number,number]>; // key → [lat,lng]
+  edges: Record<string,string[]>; // key → neighboring keys (only directly connected)
+}
+
 const segmentsIntersect = (p1:[number,number],p2:[number,number],p3:[number,number],p4:[number,number]):boolean => {
   const d1=[p2[0]-p1[0],p2[1]-p1[1]], d2=[p4[0]-p3[0],p4[1]-p3[1]];
   const cross=d1[0]*d2[1]-d1[1]*d2[0];
@@ -29,6 +35,8 @@ const findIntersectionIdx = (path:[number,number][]):number => {
   for(let i=0;i<path.length-4;i++) if(segmentsIntersect(prev,last,path[i],path[i+1])) return i;
   return -1;
 };
+
+const toKey = (lat:number, lng:number) => `${lat.toFixed(5)},${lng.toFixed(5)}`;
 
 function LocationTracker({ onLocation }: { onLocation: (pos:[number,number]) => void }) {
   const map = useMap();
@@ -71,10 +79,10 @@ export default function Map() {
   const pathRef = useRef<[number,number][]>([]);
   const capturedRef = useRef(0);
   const userRef = useRef<User|null>(null);
-  const adjRef = useRef<Record<string,string[]>>({});
+  const graphRef = useRef<RoadGraph>({nodes:{}, edges:{}});
   const timerRef = useRef<ReturnType<typeof setInterval>|null>(null);
-  const botPathsRef = useRef<Record<string,[number,number][]>>({});
   const botCurrentNodeRef = useRef<Record<string,string>>({});
+  const botPathsRef = useRef<Record<string,[number,number][]>>({});
   const botVisitedRef = useRef<Record<string,string[]>>({});
 
   useEffect(() => {
@@ -98,22 +106,36 @@ export default function Map() {
       const res = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
       const data = await res.json();
       const ways: RoadWay[] = [];
-      const adj: Record<string,string[]> = {};
+
+      // Build DENSE graph — every point on every road is a node
+      // Only consecutive points on the SAME road are connected
+      const nodes: Record<string,[number,number]> = {};
+      const edges: Record<string,string[]> = {};
+
       for (const el of data.elements) {
         if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
         const coords: [number,number][] = el.geometry.map((g:any) => [g.lat, g.lon]);
         ways.push({ id: el.id, coords });
-        for (let i = 0; i < coords.length-1; i++) {
-          const a=`${coords[i][0].toFixed(5)},${coords[i][1].toFixed(5)}`;
-          const b=`${coords[i+1][0].toFixed(5)},${coords[i+1][1].toFixed(5)}`;
-          if(!adj[a]) adj[a]=[];
-          if(!adj[b]) adj[b]=[];
-          if(!adj[a].includes(b)) adj[a].push(b);
-          if(!adj[b].includes(a)) adj[b].push(a);
+
+        // Only connect points that are NEXT TO EACH OTHER on the same road
+        for (let i = 0; i < coords.length; i++) {
+          const key = toKey(coords[i][0], coords[i][1]);
+          nodes[key] = coords[i];
+          if (!edges[key]) edges[key] = [];
+
+          // Connect to previous point on same road
+          if (i > 0) {
+            const prevKey = toKey(coords[i-1][0], coords[i-1][1]);
+            if (!edges[prevKey]) edges[prevKey] = [];
+            if (!edges[key].includes(prevKey)) edges[key].push(prevKey);
+            if (!edges[prevKey].includes(key)) edges[prevKey].push(key);
+          }
         }
       }
+
+      graphRef.current = { nodes, edges };
       setRoads(ways);
-      adjRef.current = adj;
+
       if (ways.length >= 3) {
         const makePolygon = (startIdx: number): [number,number][] => {
           const pts: [number,number][] = [];
@@ -132,13 +154,14 @@ export default function Map() {
     } catch(e) { setRoadsLoaded(true); }
   };
 
-  const findStartNode = ():string => {
-    const nodes = Object.keys(adjRef.current);
-    if (!nodes.length) return `${CAMPUS_CENTER[0]},${CAMPUS_CENTER[1]}`;
-    let best = nodes[0]; let bestDist = Infinity;
-    for (const k of nodes) {
-      const [la,ln] = k.split(',').map(Number);
-      const d = Math.abs(la-CAMPUS_CENTER[0]) + Math.abs(ln-CAMPUS_CENTER[1]);
+  const findClosestNode = (target:[number,number]):string => {
+    const { nodes } = graphRef.current;
+    const keys = Object.keys(nodes);
+    if (!keys.length) return `${target[0]},${target[1]}`;
+    let best = keys[0]; let bestDist = Infinity;
+    for (const k of keys) {
+      const [la,ln] = nodes[k];
+      const d = Math.abs(la-target[0]) + Math.abs(ln-target[1]);
       if (d < bestDist) { bestDist = d; best = k; }
     }
     return best;
@@ -189,20 +212,20 @@ export default function Map() {
 
   useEffect(() => {
     if (!isRunning || !startTime || gpsMode) return;
-    const adj = adjRef.current;
+    const { edges, nodes } = graphRef.current;
     const botNames:Record<string,string> = { bot1:'Alex', bot2:'Sarah', bot3:'Mike' };
 
-    // Initialize bots at different road nodes
-    const allNodes = Object.keys(adj);
-    if (allNodes.length > 0) {
+    // Initialize bots at different starting nodes on real roads
+    const allKeys = Object.keys(nodes);
+    if (allKeys.length > 0) {
       ['bot1','bot2','bot3'].forEach((botId, i) => {
         if (!botCurrentNodeRef.current[botId]) {
-          const startIdx = Math.floor((allNodes.length / 4) * (i + 1));
-          const startNode = allNodes[startIdx] || allNodes[0];
-          const [la,ln] = startNode.split(',').map(Number);
-          botCurrentNodeRef.current[botId] = startNode;
-          botPathsRef.current[botId] = [[la,ln]];
-          botVisitedRef.current[botId] = [startNode];
+          // Start bots at different parts of the road network
+          const startKey = allKeys[Math.floor((allKeys.length / 4) * (i + 1))];
+          const pos = nodes[startKey];
+          botCurrentNodeRef.current[botId] = startKey;
+          botPathsRef.current[botId] = [pos];
+          botVisitedRef.current[botId] = [startKey];
         }
       });
     }
@@ -211,13 +234,13 @@ export default function Map() {
       setElapsed(Math.floor((Date.now()-startTime)/1000));
       setDistance(p => p+0.008);
 
-      // Player movement
+      // Player movement along roads
       const cur = currentNodeRef.current;
-      const neighbors = adj[cur] || [];
+      const neighbors = edges[cur] || [];
       if (neighbors.length) {
         const next = neighbors[Math.floor(Math.random()*neighbors.length)];
-        const [la,ln] = next.split(',').map(Number);
-        const newPos:[number,number] = [la,ln];
+        const pos = nodes[next] || next.split(',').map(Number) as [number,number];
+        const newPos: [number,number] = Array.isArray(pos) ? pos : nodes[next];
         const newPath = [...pathRef.current, newPos];
         pathRef.current = newPath;
         setRunPath([...newPath]);
@@ -225,32 +248,35 @@ export default function Map() {
         currentNodeRef.current = next;
       }
 
-      // Bot movement on real roads
+      // Bot movement — strictly along connected road segments only
       ['bot1','bot2','bot3'].forEach(botId => {
         const curNode = botCurrentNodeRef.current[botId];
         if (!curNode) return;
-        const botNeighbors = adj[curNode] || [];
+
+        // Only move to directly connected road neighbors
+        const botNeighbors = edges[curNode] || [];
         if (!botNeighbors.length) return;
 
-        // Prefer unvisited roads like a real runner exploring
-        const visited = botVisitedRef.current[botId] || [];
-        const unvisited = botNeighbors.filter(n => !visited.includes(n));
-        const nextNode = unvisited.length > 0
-          ? unvisited[Math.floor(Math.random() * unvisited.length)]
+        // Prefer roads not recently visited to simulate exploration
+        const recentVisited = (botVisitedRef.current[botId] || []).slice(-20);
+        const fresh = botNeighbors.filter(n => !recentVisited.includes(n));
+        const nextNode = fresh.length > 0
+          ? fresh[Math.floor(Math.random() * fresh.length)]
           : botNeighbors[Math.floor(Math.random() * botNeighbors.length)];
 
-        const [bLa,bLn] = nextNode.split(',').map(Number);
-        const newBotPos:[number,number] = [bLa, bLn];
+        const nextPos = nodes[nextNode];
+        if (!nextPos) return;
+
         const currentBotPath = botPathsRef.current[botId] || [];
-        const newBotPath = [...currentBotPath, newBotPos];
+        const newBotPath = [...currentBotPath, nextPos];
         botPathsRef.current[botId] = newBotPath;
         botCurrentNodeRef.current[botId] = nextNode;
-        botVisitedRef.current[botId] = [...visited.slice(-50), nextNode];
+        botVisitedRef.current[botId] = [...(botVisitedRef.current[botId]||[]).slice(-50), nextNode];
 
-        // Update bot trail on map
-        setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-30)}));
+        // Show last 40 points of bot trail
+        setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-40)}));
 
-        // Check if bot path loops → capture territory
+        // Check if bot path crossed itself → capture territory
         const crossIdx = findIntersectionIdx(newBotPath);
         if (crossIdx >= 0) {
           const poly = newBotPath.slice(crossIdx) as [number,number][];
@@ -262,10 +288,9 @@ export default function Map() {
             setToastType('warning');
             setToast(`⚠️ ${botNames[botId]} captured an area!`);
             setTimeout(()=>setToast(''),2500);
-            // Reset bot path
-            botPathsRef.current[botId] = [newBotPos];
+            botPathsRef.current[botId] = [nextPos];
             botVisitedRef.current[botId] = [nextNode];
-            setBotTrails(prev => ({...prev, [botId]: [newBotPos]}));
+            setBotTrails(prev => ({...prev, [botId]: [nextPos]}));
           }
         }
       });
@@ -282,18 +307,18 @@ export default function Map() {
   }, [isRunning, gpsMode, startTime]);
 
   const startRun = (useGPS = false) => {
-    const start = findStartNode();
-    const [la,ln] = start.split(',').map(Number);
-    currentNodeRef.current = start;
-    pathRef.current = [[la,ln]];
+    const startNode = findClosestNode(CAMPUS_CENTER);
+    const { nodes } = graphRef.current;
+    const startPos = nodes[startNode] || CAMPUS_CENTER;
+    currentNodeRef.current = startNode;
+    pathRef.current = [startPos];
     capturedRef.current = 0;
-    // Reset bots
-    botPathsRef.current = {};
     botCurrentNodeRef.current = {};
+    botPathsRef.current = {};
     botVisitedRef.current = {};
     setBotTrails({});
     setIsRunning(true); setStartTime(Date.now());
-    setRunPath([[la,ln]]); setDistance(0); setElapsed(0); setCaptured(0);
+    setRunPath([startPos]); setDistance(0); setElapsed(0); setCaptured(0);
     setGpsMode(useGPS); setGpsError('');
     if (useGPS && !navigator.geolocation) setGpsError('GPS not supported on this device');
   };
@@ -331,11 +356,11 @@ export default function Map() {
         {roads.map(r=>(<Polyline key={r.id} positions={r.coords} pathOptions={{color:'#ffffff',weight:1.5,opacity:0.3,dashArray:'4 4'}}/>))}
         {territories.map(t=>(<Polygon key={t.id} positions={t.polygon} pathOptions={{color:t.color,fillColor:t.color,fillOpacity:0.4,weight:2}}/>))}
 
-        {/* Bot trails on real roads */}
+        {/* Bot trails — strictly on roads */}
         {Object.entries(botTrails).map(([botId, trail]) =>
           trail.length > 1 ? (
             <Polyline key={`trail_${botId}`} positions={trail}
-              pathOptions={{color:BOT_COLORS[botId], weight:3, opacity:0.7, dashArray:'6 3'}}/>
+              pathOptions={{color:BOT_COLORS[botId], weight:3, opacity:0.8, dashArray:'5 3'}}/>
           ) : null
         )}
 
@@ -416,10 +441,3 @@ export default function Map() {
     </div>
   );
 }
-```
-
-Press **Ctrl+S** → then push to Vercel:
-```
-git add .
-git commit -m "bots follow real roads like real runners"
-git push
