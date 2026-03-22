@@ -38,13 +38,14 @@ const findIntersectionIdx = (path:[number,number][]):number => {
 
 // Also check if path forms a closed loop by proximity
 const findLoopIdx = (path:[number,number][]):number => {
-  if(path.length < 8) return -1;
+  if(path.length < 6) return -1;
   const last = path[path.length-1];
-  for(let i=0;i<path.length-7;i++){
+  // Check against all previous points except last 5
+  for(let i=0; i<path.length-5; i++){
     const dx = last[0]-path[i][0];
     const dy = last[1]-path[i][1];
     const dist = Math.sqrt(dx*dx+dy*dy);
-    if(dist < 0.0003) return i; // ~30 meters threshold
+    if(dist < 0.0005) return i; // ~50 meters threshold
   }
   return -1;
 };
@@ -181,7 +182,7 @@ export default function Map() {
   };
 
   const handleCapture = (newPos:[number,number], path:[number,number][]):boolean => {
-    const sliced = path.slice(-80);
+     const sliced = path.slice(-100);
     const intersectIdx = findIntersectionIdx(sliced);
     const loopIdx = findLoopIdx(sliced);
     const idx = intersectIdx >= 0 ? intersectIdx : loopIdx;
@@ -293,10 +294,11 @@ export default function Map() {
         setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-40)}));
 
          // Check if bot path forms a loop → capture territory
-        const slicedPath = newBotPath.slice(-80);
-        const crossIdx = findIntersectionIdx(slicedPath) >= 0
-          ? findIntersectionIdx(slicedPath)
-          : findLoopIdx(slicedPath);
+        const fullPath = newBotPath;
+        const slicedPath = fullPath.slice(-100);
+        const intersectIdx = findIntersectionIdx(slicedPath);
+        const loopIdx = findLoopIdx(slicedPath);
+        const crossIdx = intersectIdx >= 0 ? intersectIdx : loopIdx;
         if (crossIdx >= 0) {
           const poly = newBotPath.slice(crossIdx) as [number,number][];
           if (poly.length >= 3) {
