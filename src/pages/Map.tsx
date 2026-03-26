@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapContainer, TileLayer, Polygon, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Polygon, Polyline, Marker, useMap } from 'react-leaflet';
 import { getCurrentUser, updateUser, saveTerritoryToFirebase, subscribeToTerritories } from '../utils/storage';
 import { User } from '../types';
 import BottomNavigation from '../components/BottomNavigation';
@@ -400,7 +400,7 @@ export default function Map() {
           ) : null
         )}
 
-        {myLocation && (<Polygon positions={[[myLocation[0]+0.00005,myLocation[1]],[myLocation[0],myLocation[1]+0.00005],[myLocation[0]-0.00005,myLocation[1]],[myLocation[0],myLocation[1]-0.00005]]} pathOptions={{color:'#39d353',fillColor:'#39d353',fillOpacity:1,weight:2}}/>)}
+        {myLocation && <Marker position={myLocation} />}
         {runPath.length>1 && (<Polyline positions={runPath} pathOptions={{color:'#39d353',weight:4,opacity:0.9}}/>)}
       </MapContainer>
 
