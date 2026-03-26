@@ -378,7 +378,19 @@ export default function Map() {
         <TileLayer attribution="Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"/>
         {gpsMode && <LocationTracker onLocation={handleGPSLocation}/>}
         {roads.map(r=>(<Polyline key={r.id} positions={r.coords} pathOptions={{color:'#ffffff',weight:1.5,opacity:0.3,dashArray:'4 4'}}/>))}
-        {territories.map(t=>(<Polygon key={t.id} positions={t.polygon} pathOptions={{color:t.color,fillColor:t.color,fillOpacity:0.4,weight:2}}/>))}
+        {territories.map(t=>(
+  <Polygon
+    key={t.id}
+    positions={t.polygon}
+    pathOptions={{
+      color: t.color,
+      fillColor: t.color,
+      fillOpacity: 0.2,
+      opacity: 0.5,
+      weight: 2
+    }}
+  />
+))}
 
         {/* Bot trails — strictly on roads */}
         {Object.entries(botTrails).map(([botId, trail]) =>
