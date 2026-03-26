@@ -104,6 +104,7 @@ export default function Map() {
     if (!u) { navigate('/'); return; }
     setUser(u); userRef.current = u;
     fetchRoads();
+    
     const unsub = subscribeToTerritories((firebaseTerritories) => {
       setTerritories(current => {
         const mine = current.filter(t => t.owner === userRef.current?.id);
@@ -315,7 +316,7 @@ export default function Map() {
           }
         }
       });
-    }, 2000);
+    }, 3500);
 
     timerRef.current = interval;
     return () => clearInterval(interval);
@@ -373,7 +374,7 @@ export default function Map() {
   return (
     <div style={{position:'relative', height:'100vh', background:'#080808', fontFamily:"'Barlow', sans-serif"}}>
       <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@700;800;900&display=swap" rel="stylesheet"/>
-      <MapContainer center={CAMPUS_CENTER} zoom={16} style={{height:'calc(100vh - 80px)', zIndex:1}} zoomControl={false}>
+      <MapContainer center={myLocation || CAMPUS_CENTER} zoom={17} style={{height:'calc(100vh - 80px)', zIndex:1}} zoomControl={false}>
         <TileLayer attribution="Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"/>
         {gpsMode && <LocationTracker onLocation={handleGPSLocation}/>}
         {roads.map(r=>(<Polyline key={r.id} positions={r.coords} pathOptions={{color:'#ffffff',weight:1.5,opacity:0.3,dashArray:'4 4'}}/>))}
