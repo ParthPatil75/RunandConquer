@@ -389,7 +389,7 @@ export default function Map() {
       <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@700;800;900&display=swap" rel="stylesheet"/>
       <MapContainer center={myLocation || CAMPUS_CENTER} zoom={17} style={{height:'calc(100vh - 80px)', zIndex:1}} zoomControl={false}>
         <TileLayer attribution="Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"/>
-        {gpsMode && <LocationTracker onLocation={handleGPSLocation}/>}
+        if (e.accuracy > <LocationTracker onLocation={handleGPSLocation}/>) return;
         {roads.map(r=>(<Polyline key={r.id} positions={r.coords} pathOptions={{color:'#ffffff',weight:1.5,opacity:0.3,dashArray:'4 4'}}/>))}
         {territories.map(t=>(
   <Polygon
