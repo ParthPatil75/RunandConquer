@@ -4,7 +4,20 @@ import { MapContainer, TileLayer, Polygon, Polyline, Marker, useMap } from 'reac
 import { getCurrentUser, updateUser, saveTerritoryToFirebase, subscribeToTerritories } from '../utils/storage';
 import { User } from '../types';
 import BottomNavigation from '../components/BottomNavigation';
+import L from 'leaflet'; // Added this
 import 'leaflet/dist/leaflet.css';
+
+// --- ADD THIS BLOCK TO FIX INVISIBLE MARKER ---
+import icon from 'leaflet/dist/images/marker-icon.png';
+import iconShadow from 'leaflet/dist/images/marker-shadow.png';
+let DefaultIcon = L.icon({
+    iconUrl: icon,
+    shadowUrl: iconShadow,
+    iconSize: [25, 41],
+    iconAnchor: [12, 41]
+});
+L.Marker.prototype.options.icon = DefaultIcon;
+// ----------------------------------------------
 
 const BOT_COLORS: Record<string,string> = { bot1:'#4D96FF', bot2:'#FF922B', bot3:'#CC5DE8' };
 const PLAYER_COLOR = '#39d353';
@@ -57,7 +70,7 @@ function LocationTracker({ onLocation }: { onLocation: (pos:[number,number]) => 
   useEffect(() => {
     map.locate({ watch: true, enableHighAccuracy: true, maximumAge: 3000 });
     map.on('locationfound', (e) => {
-      if (e.accuracy > 30) return;
+      if (e.accuracy > 5000) return; // Accuracy threshold increased for better indoor testing
       onLocation([e.latlng.lat, e.latlng.lng]);
       map.panTo(e.latlng);
     });
