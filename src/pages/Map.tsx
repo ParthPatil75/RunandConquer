@@ -114,10 +114,16 @@ export default function Map() {
     return () => unsub();
   }, [navigate]);
  
-  const fetchRoads = async () => {
+  const fetchRoads = async (attempt = 1) => {
     try {
       const query = `[out:json];way[highway](${BBOX});out geom;`;
-      const res = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const res = await fetch(
+        `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
+        { signal: controller.signal }
+      );
+      clearTimeout(timeout);
       const data = await res.json();
       const ways: RoadWay[] = [];
       const nodes: Record<string,[number,number]> = {};
@@ -159,7 +165,15 @@ export default function Map() {
         ]);
       }
       setRoadsLoaded(true);
-    } catch(e) { setRoadsLoaded(true); }
+    } catch(e) {
+      console.error('Road fetch failed attempt', attempt, e);
+      if (attempt < 3) {
+        setTimeout(() => fetchRoads(attempt + 1), 3000);
+      } else {
+        setRoadsLoaded(true);
+        setGpsError('Roads failed to load. SIMULATE may not move.');
+      }
+    }
   };
  
   const findClosestNode = (target:[number,number]):string => {
@@ -319,9 +333,14 @@ export default function Map() {
  
   const startRun = (useGPS = false) => {
     setTerritories([]);
-    const startNode = findClosestNode(CAMPUS_CENTER);
-    const { nodes } = graphRef.current;
+    const { nodes, edges } = graphRef.current;
+    const hasRoads = Object.keys(nodes).length > 0;
+    const startNode = hasRoads ? findClosestNode(CAMPUS_CENTER) : 'fallback';
     const startPos = nodes[startNode] || CAMPUS_CENTER;
+    if (!hasRoads) {
+      setGpsError('Roads not loaded yet — try refreshing the page');
+      return;
+    }
     currentNodeRef.current = startNode;
     pathRef.current = [startPos];
     capturedRef.current = 0;
@@ -402,8 +421,8 @@ export default function Map() {
       </MapContainer>
  
       {!roadsLoaded && (
-        <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',zIndex:9999,background:'rgba(0,0,0,0.8)',color:'white',padding:'8px 20px',borderRadius:999,fontSize:14}}>
-          Loading campus roads...
+        <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',zIndex:9999,background:'rgba(0,0,0,0.8)',color:'white',padding:'8px 20px',borderRadius:999,fontSize:14,textAlign:'center'}}>
+          ⏳ Loading campus roads... (may take 10–15 sec)
         </div>
       )}
  
