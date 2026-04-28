@@ -120,9 +120,9 @@ export default function Map() {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(
-        `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
-        { signal: controller.signal }
-      );
+  `https://corsproxy.io/?https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
+  { signal: controller.signal }
+);
       clearTimeout(timeout);
       const data = await res.json();
       const ways: RoadWay[] = [];
@@ -331,28 +331,78 @@ export default function Map() {
     return () => clearInterval(t);
   }, [isRunning, gpsMode, startTime]);
  
+    const startRun = (useGPS = false) => {
   const startRun = (useGPS = false) => {
-    setTerritories([]);
-    const { nodes, edges } = graphRef.current;
-    const hasRoads = Object.keys(nodes).length > 0;
-    const startNode = hasRoads ? findClosestNode(CAMPUS_CENTER) : 'fallback';
-    const startPos = nodes[startNode] || CAMPUS_CENTER;
-    if (!hasRoads) {
-      setGpsError('Roads not loaded yet — try refreshing the page');
-      return;
+  setTerritories([]);
+
+  let { nodes, edges } = graphRef.current;
+
+  // ✅ fallback if roads not loaded (GRID SYSTEM)
+  if (Object.keys(nodes).length === 0) {
+    nodes = {};
+    edges = {};
+    const size = 10;
+
+    for (let i = 0; i < size; i++) {
+      for (let j = 0; j < size; j++) {
+        const lat = CAMPUS_CENTER[0] + i * 0.0002;
+        const lng = CAMPUS_CENTER[1] + j * 0.0002;
+        const key = `${lat},${lng}`;
+
+        nodes[key] = [lat, lng];
+        edges[key] = [];
+      }
     }
-    currentNodeRef.current = startNode;
-    pathRef.current = [startPos];
-    capturedRef.current = 0;
-    botCurrentNodeRef.current = {};
-    botPathsRef.current = {};
-    botVisitedRef.current = {};
-    setBotTrails({});
-    setIsRunning(true); setStartTime(Date.now());
-    setRunPath([startPos]); setDistance(0); setElapsed(0); setCaptured(0);
-    setGpsMode(useGPS); setGpsError('');
-    if (useGPS && !navigator.geolocation) setGpsError('GPS not supported on this device');
-  };
+
+    for (let i = 0; i < size; i++) {
+      for (let j = 0; j < size; j++) {
+        const lat = CAMPUS_CENTER[0] + i * 0.0002;
+        const lng = CAMPUS_CENTER[1] + j * 0.0002;
+        const key = `${lat},${lng}`;
+
+        // connect right
+        if (j < size - 1) {
+          const rightKey = `${lat},${CAMPUS_CENTER[1] + (j + 1) * 0.0002}`;
+          edges[key].push(rightKey);
+        }
+
+        // connect down
+        if (i < size - 1) {
+          const downKey = `${CAMPUS_CENTER[0] + (i + 1) * 0.0002},${lng}`;
+          edges[key].push(downKey);
+        }
+      }
+    }
+
+    graphRef.current = { nodes, edges };
+  }
+
+  const startNode = findClosestNode(CAMPUS_CENTER);
+  const startPos = nodes[startNode] || CAMPUS_CENTER;
+
+  currentNodeRef.current = startNode;
+  pathRef.current = [startPos];
+  capturedRef.current = 0;
+
+  botCurrentNodeRef.current = {};
+  botPathsRef.current = {};
+  botVisitedRef.current = {};
+  setBotTrails({});
+
+  setIsRunning(true);
+  setStartTime(Date.now());
+  setRunPath([startPos]);
+  setDistance(0);
+  setElapsed(0);
+  setCaptured(0);
+
+  setGpsMode(useGPS);
+  setGpsError('');
+
+  if (useGPS && !navigator.geolocation) {
+    setGpsError('GPS not supported on this device');
+  }
+};
  
   const stopRun = () => {
     const fd=distance, ft=elapsed, fc=capturedRef.current;
