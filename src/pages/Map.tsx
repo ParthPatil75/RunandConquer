@@ -8,7 +8,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
 import markerShadow from 'leaflet/dist/images/marker-shadow.png';
- 
+
 // Fix invisible marker in React + Leaflet
 L.Marker.prototype.options.icon = L.icon({
   iconUrl: markerIcon,
@@ -16,21 +16,21 @@ L.Marker.prototype.options.icon = L.icon({
   iconSize: [25, 41],
   iconAnchor: [12, 41]
 });
- 
+
 // Cool neon colors for territories
 const BOT_COLORS: Record<string,string> = { bot1:'#00C6FF', bot2:'#FF6B6B', bot3:'#C77DFF' };
 const PLAYER_COLOR = '#00FF87';
 const CAMPUS_CENTER: [number,number] = [18.4926, 74.0255];
 const BBOX = '18.488,74.018,18.500,74.032';
- 
+
 interface RoadWay { id: number; coords: [number,number][] }
 interface Territory { id:string; owner:string; ownerName:string; polygon:[number,number][]; color:string; }
- 
+
 interface RoadGraph {
   nodes: Record<string,[number,number]>;
   edges: Record<string,string[]>;
 }
- 
+
 // Only detect real crossing loops — NOT backtracking A→B→A
 const segmentsIntersect = (p1:[number,number],p2:[number,number],p3:[number,number],p4:[number,number]):boolean => {
   const d1=[p2[0]-p1[0],p2[1]-p1[1]], d2=[p4[0]-p3[0],p4[1]-p3[1]];
@@ -40,32 +40,36 @@ const segmentsIntersect = (p1:[number,number],p2:[number,number],p3:[number,numb
   const u=((p3[0]-p1[0])*d1[1]-(p3[1]-p1[1])*d1[0])/cross;
   return t>0.05&&t<0.95&&u>0.05&&u<0.95;
 };
- 
+
 const findIntersectionIdx = (path:[number,number][]):number => {
   if(path.length<6) return -1;
   const last=path[path.length-1], prev=path[path.length-2];
   for(let i=0;i<path.length-5;i++) if(segmentsIntersect(prev,last,path[i],path[i+1])) return i;
   return -1;
 };
- 
+
 const toKey = (lat:number, lng:number) => `${lat.toFixed(5)},${lng.toFixed(5)}`;
- 
-// Always-on location tracker — works on load, no button press needed
+
+// FIX (Bonus): pan map only once on first GPS location, not on every tick
 function LocationTracker({ onLocation }: { onLocation: (pos:[number,number]) => void }) {
   const map = useMap();
+  const hasLocated = useRef(false);
   useEffect(() => {
     map.locate({ watch: true, enableHighAccuracy: true, maximumAge: 3000 });
     map.on('locationfound', (e) => {
-      if (e.accuracy > 5000) return; // Accepts laptop WiFi location too
+      if (e.accuracy > 5000) return;
       onLocation([e.latlng.lat, e.latlng.lng]);
-      map.panTo(e.latlng);
+      if (!hasLocated.current) {
+        map.panTo(e.latlng);
+        hasLocated.current = true;
+      }
     });
     map.on('locationerror', (e) => { console.log('GPS error:', e.message); });
     return () => { map.stopLocate(); };
   }, [map]);
   return null;
 }
- 
+
 export default function Map() {
   const navigate = useNavigate();
   const [user, setUser] = useState<User|null>(null);
@@ -86,7 +90,7 @@ export default function Map() {
   const [gpsError, setGpsError] = useState('');
   const [myLocation, setMyLocation] = useState<[number,number]|null>(null);
   const [summaryData, setSummaryData] = useState({time:0,dist:0,zones:0});
- 
+
   const watchIdRef = useRef<number|null>(null);
   const currentNodeRef = useRef<string>('');
   const pathRef = useRef<[number,number][]>([]);
@@ -97,13 +101,13 @@ export default function Map() {
   const botCurrentNodeRef = useRef<Record<string,string>>({});
   const botPathsRef = useRef<Record<string,[number,number][]>>({});
   const botVisitedRef = useRef<Record<string,string[]>>({});
- 
+
   useEffect(() => {
     const u = getCurrentUser();
     if (!u) { navigate('/'); return; }
     setUser(u); userRef.current = u;
     fetchRoads();
-    
+
     const unsub = subscribeToTerritories((firebaseTerritories) => {
       setTerritories(current => {
         const mine = current.filter(t => t.owner === userRef.current?.id);
@@ -113,27 +117,31 @@ export default function Map() {
     });
     return () => unsub();
   }, [navigate]);
- 
+
+  // FIX (Bug 1): correct proxy URL with proper template literals and api.allorigins.win
   const fetchRoads = async (attempt = 1) => {
     try {
       const query = `[out:json];way[highway](${BBOX});out geom;`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       const res = await fetch(
-  `https://corsproxy.io/?https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
-  { signal: controller.signal }
-);
+        `https://api.allorigins.win/get?url=${encodeURIComponent(
+          `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`
+        )}`,
+        { signal: controller.signal }
+      );
       clearTimeout(timeout);
-      const data = await res.json();
+      const wrapper = await res.json();
+      const data = JSON.parse(wrapper.contents);
       const ways: RoadWay[] = [];
       const nodes: Record<string,[number,number]> = {};
       const edges: Record<string,string[]> = {};
- 
+
       for (const el of data.elements) {
         if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
         const coords: [number,number][] = el.geometry.map((g:any) => [g.lat, g.lon]);
         ways.push({ id: el.id, coords });
- 
+
         for (let i = 0; i < coords.length; i++) {
           const key = toKey(coords[i][0], coords[i][1]);
           nodes[key] = coords[i];
@@ -146,10 +154,10 @@ export default function Map() {
           }
         }
       }
- 
+
       graphRef.current = { nodes, edges };
       setRoads(ways);
- 
+
       if (ways.length >= 3) {
         const makePolygon = (startIdx: number): [number,number][] => {
           const pts: [number,number][] = [];
@@ -175,7 +183,7 @@ export default function Map() {
       }
     }
   };
- 
+
   const findClosestNode = (target:[number,number]):string => {
     const { nodes } = graphRef.current;
     const keys = Object.keys(nodes);
@@ -188,11 +196,10 @@ export default function Map() {
     }
     return best;
   };
- 
-  // Fixed: only real crossing loops, no false A→B→A detection
+
   const handleCapture = (newPos:[number,number], path:[number,number][]):boolean => {
     const sliced = path.slice(-100);
-    const idx = findIntersectionIdx(sliced); // removed findLoopIdx — was causing false captures
+    const idx = findIntersectionIdx(sliced);
     if (idx >= 0) {
       const poly = path.slice(idx) as [number,number][];
       if (poly.length >= 3) {
@@ -214,7 +221,7 @@ export default function Map() {
     }
     return false;
   };
- 
+
   const handleGPSLocation = (pos:[number,number]) => {
     setMyLocation(pos);
     if (!isRunning) return;
@@ -233,12 +240,12 @@ export default function Map() {
     setRunPath([...newPath]);
     handleCapture(pos, newPath);
   };
- 
+
   useEffect(() => {
     if (!isRunning || !startTime || gpsMode) return;
     const { edges, nodes } = graphRef.current;
     const botNames:Record<string,string> = { bot1:'Alex', bot2:'Sarah', bot3:'Mike' };
- 
+
     const allKeys = Object.keys(nodes);
     if (allKeys.length > 0) {
       ['bot1','bot2','bot3'].forEach((botId, i) => {
@@ -251,11 +258,11 @@ export default function Map() {
         }
       });
     }
- 
+
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now()-startTime)/1000));
       setDistance(p => p+0.008);
- 
+
       // Player simulation movement
       const cur = currentNodeRef.current;
       const neighbors = edges[cur] || [];
@@ -269,16 +276,15 @@ export default function Map() {
         handleCapture(newPos, newPath);
         currentNodeRef.current = next;
       }
- 
+
       // Bot movement — natural, no U-turns, feels like a real person
       ['bot1','bot2','bot3'].forEach(botId => {
         const curNode = botCurrentNodeRef.current[botId];
         if (!curNode) return;
- 
+
         const botNeighbors = edges[curNode] || [];
         if (!botNeighbors.length) return;
- 
-        // Avoid backtracking — bots move forward like a real runner
+
         const recentVisited = (botVisitedRef.current[botId] || []).slice(-8);
         const lastNode = (botVisitedRef.current[botId] || []).slice(-2)[0];
         const notBacktrack = botNeighbors.filter(n => n !== lastNode);
@@ -288,19 +294,18 @@ export default function Map() {
           : notBacktrack.length > 0
             ? notBacktrack[Math.floor(Math.random() * notBacktrack.length)]
             : botNeighbors[Math.floor(Math.random() * botNeighbors.length)];
- 
+
         const nextPos = nodes[nextNode];
         if (!nextPos) return;
- 
+
         const currentBotPath = botPathsRef.current[botId] || [];
         const newBotPath = [...currentBotPath, nextPos];
         botPathsRef.current[botId] = newBotPath;
         botCurrentNodeRef.current[botId] = nextNode;
         botVisitedRef.current[botId] = [...(botVisitedRef.current[botId]||[]).slice(-50), nextNode];
- 
+
         setBotTrails(prev => ({...prev, [botId]: newBotPath.slice(-40)}));
- 
-        // Bot loop detection — only real crossings
+
         const slicedPath = newBotPath.slice(-100);
         const crossIdx = findIntersectionIdx(slicedPath);
         if (crossIdx >= 0) {
@@ -320,90 +325,85 @@ export default function Map() {
         }
       });
     }, 3500);
- 
+
     timerRef.current = interval;
     return () => clearInterval(interval);
   }, [isRunning, startTime, gpsMode]);
- 
+
   useEffect(() => {
     if (!isRunning || !gpsMode || !startTime) return;
     const t = setInterval(() => setElapsed(Math.floor((Date.now()-startTime)/1000)), 1000);
     return () => clearInterval(t);
   }, [isRunning, gpsMode, startTime]);
- 
-    const startRun = (useGPS = false) => {
+
+  // FIX (Bug 2): removed duplicate startRun declaration — only one exists now
   const startRun = (useGPS = false) => {
-  setTerritories([]);
+    setTerritories([]);
 
-  let { nodes, edges } = graphRef.current;
+    let { nodes, edges } = graphRef.current;
 
-  // ✅ fallback if roads not loaded (GRID SYSTEM)
-  if (Object.keys(nodes).length === 0) {
-    nodes = {};
-    edges = {};
-    const size = 10;
+    // fallback if roads not loaded (GRID SYSTEM)
+    if (Object.keys(nodes).length === 0) {
+      nodes = {};
+      edges = {};
+      const size = 10;
 
-    for (let i = 0; i < size; i++) {
-      for (let j = 0; j < size; j++) {
-        const lat = CAMPUS_CENTER[0] + i * 0.0002;
-        const lng = CAMPUS_CENTER[1] + j * 0.0002;
-        const key = `${lat},${lng}`;
-
-        nodes[key] = [lat, lng];
-        edges[key] = [];
-      }
-    }
-
-    for (let i = 0; i < size; i++) {
-      for (let j = 0; j < size; j++) {
-        const lat = CAMPUS_CENTER[0] + i * 0.0002;
-        const lng = CAMPUS_CENTER[1] + j * 0.0002;
-        const key = `${lat},${lng}`;
-
-        // connect right
-        if (j < size - 1) {
-          const rightKey = `${lat},${CAMPUS_CENTER[1] + (j + 1) * 0.0002}`;
-          edges[key].push(rightKey);
-        }
-
-        // connect down
-        if (i < size - 1) {
-          const downKey = `${CAMPUS_CENTER[0] + (i + 1) * 0.0002},${lng}`;
-          edges[key].push(downKey);
+      for (let i = 0; i < size; i++) {
+        for (let j = 0; j < size; j++) {
+          const lat = CAMPUS_CENTER[0] + i * 0.0002;
+          const lng = CAMPUS_CENTER[1] + j * 0.0002;
+          const key = `${lat},${lng}`;
+          nodes[key] = [lat, lng];
+          edges[key] = [];
         }
       }
+
+      for (let i = 0; i < size; i++) {
+        for (let j = 0; j < size; j++) {
+          const lat = CAMPUS_CENTER[0] + i * 0.0002;
+          const lng = CAMPUS_CENTER[1] + j * 0.0002;
+          const key = `${lat},${lng}`;
+
+          if (j < size - 1) {
+            const rightKey = `${lat},${CAMPUS_CENTER[1] + (j + 1) * 0.0002}`;
+            edges[key].push(rightKey);
+          }
+          if (i < size - 1) {
+            const downKey = `${CAMPUS_CENTER[0] + (i + 1) * 0.0002},${lng}`;
+            edges[key].push(downKey);
+          }
+        }
+      }
+
+      graphRef.current = { nodes, edges };
     }
 
-    graphRef.current = { nodes, edges };
-  }
+    const startNode = findClosestNode(CAMPUS_CENTER);
+    const startPos = nodes[startNode] || CAMPUS_CENTER;
 
-  const startNode = findClosestNode(CAMPUS_CENTER);
-  const startPos = nodes[startNode] || CAMPUS_CENTER;
+    currentNodeRef.current = startNode;
+    pathRef.current = [startPos];
+    capturedRef.current = 0;
 
-  currentNodeRef.current = startNode;
-  pathRef.current = [startPos];
-  capturedRef.current = 0;
+    botCurrentNodeRef.current = {};
+    botPathsRef.current = {};
+    botVisitedRef.current = {};
+    setBotTrails({});
 
-  botCurrentNodeRef.current = {};
-  botPathsRef.current = {};
-  botVisitedRef.current = {};
-  setBotTrails({});
+    setIsRunning(true);
+    setStartTime(Date.now());
+    setRunPath([startPos]);
+    setDistance(0);
+    setElapsed(0);
+    setCaptured(0);
+    setGpsMode(useGPS);
+    setGpsError('');
 
-  setIsRunning(true);
-  setStartTime(Date.now());
-  setRunPath([startPos]);
-  setDistance(0);
-  setElapsed(0);
-  setCaptured(0);
+    if (useGPS && !navigator.geolocation) {
+      setGpsError('GPS not supported on this device');
+    }
+  };
 
-  setGpsMode(useGPS);
-  setGpsError('');
-
-  if (useGPS && !navigator.geolocation) {
-    setGpsError('GPS not supported on this device');
-  }
-};
- 
   const stopRun = () => {
     const fd=distance, ft=elapsed, fc=capturedRef.current;
     setIsRunning(false); setRunPath([]); setBotTrails({});
@@ -423,24 +423,22 @@ export default function Map() {
     setShowSummary(true);
     setTimeout(()=>setShowSummary(false), 6000);
   };
- 
+
   const fmt = (s:number) => `${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
   if (!user) return null;
   const myCount = territories.filter(t=>t.owner===user.id).length;
- 
+
   return (
     <div style={{position:'relative', height:'100vh', background:'#080808', fontFamily:"'Barlow', sans-serif"}}>
       <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@700;800;900&display=swap" rel="stylesheet"/>
- 
+
       <MapContainer center={myLocation || CAMPUS_CENTER} zoom={17} style={{height:'calc(100vh - 80px)', zIndex:1}} zoomControl={false}>
         <TileLayer attribution="Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"/>
- 
-        {/* Always active — finds your location immediately on load */}
+
         <LocationTracker onLocation={handleGPSLocation}/>
- 
+
         {roads.map(r=>(<Polyline key={r.id} positions={r.coords} pathOptions={{color:'#ffffff',weight:1.5,opacity:0.3,dashArray:'4 4'}}/>))}
- 
-        {/* Cool neon territory colors */}
+
         {territories.map(t=>(
           <Polygon
             key={t.id}
@@ -454,35 +452,32 @@ export default function Map() {
             }}
           />
         ))}
- 
-        {/* Bot trails on roads */}
+
         {Object.entries(botTrails).map(([botId, trail]) =>
           trail.length > 1 ? (
             <Polyline key={`trail_${botId}`} positions={trail}
               pathOptions={{color:BOT_COLORS[botId], weight:3, opacity:0.8, dashArray:'5 3'}}/>
           ) : null
         )}
- 
-        {/* Your live location marker */}
+
         {myLocation && <Marker position={myLocation} />}
- 
-        {/* Your running path */}
+
         {runPath.length>1 && (<Polyline positions={runPath} pathOptions={{color:PLAYER_COLOR,weight:4,opacity:0.9}}/>)}
       </MapContainer>
- 
+
       {!roadsLoaded && (
         <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',zIndex:9999,background:'rgba(0,0,0,0.8)',color:'white',padding:'8px 20px',borderRadius:999,fontSize:14,textAlign:'center'}}>
           ⏳ Loading campus roads... (may take 10–15 sec)
         </div>
       )}
- 
+
       {!isRunning && roadsLoaded && (
         <div style={{position:'absolute',top:16,right:16,zIndex:9999,display:'flex',flexDirection:'column',gap:8}}>
           <button onClick={()=>startRun(false)} style={{background:'#00FF87',color:'black',fontWeight:900,padding:'12px 20px',borderRadius:16,border:'none',cursor:'pointer',fontSize:14,fontFamily:"'Barlow Condensed',sans-serif"}}>▶ SIMULATE</button>
           <button onClick={()=>startRun(true)} style={{background:'#3b82f6',color:'white',fontWeight:900,padding:'12px 20px',borderRadius:16,border:'none',cursor:'pointer',fontSize:14,fontFamily:"'Barlow Condensed',sans-serif"}}>📍 GPS RUN</button>
         </div>
       )}
- 
+
       {isRunning && (
         <div style={{position:'absolute',top:16,left:16,right:16,zIndex:9999}}>
           <div style={{background:'rgba(0,0,0,0.85)',backdropFilter:'blur(10px)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:24,padding:16}}>
@@ -503,7 +498,7 @@ export default function Map() {
           </div>
         </div>
       )}
- 
+
       <div style={{position:'absolute',bottom:96,left:16,right:16,zIndex:9999}}>
         <div style={{background:'rgba(0,0,0,0.85)',backdropFilter:'blur(10px)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:16,padding:'12px 16px',display:'flex',justifyContent:'space-around',textAlign:'center'}}>
           {[
@@ -519,14 +514,14 @@ export default function Map() {
           ))}
         </div>
       </div>
- 
+
       {toast && (
         <div style={{position:'absolute',top:'33%',left:'50%',transform:'translate(-50%,-50%)',zIndex:9999,textAlign:'center'}}>
           <div style={{background:toastType==='capture'?'#00FF87':'#FF6B6B',color:'black',fontWeight:900,padding:'16px 24px',borderRadius:16,fontSize:16,border:'3px solid white',whiteSpace:'nowrap',fontFamily:"'Barlow Condensed',sans-serif"}}>{toast}</div>
           <p style={{color:'rgba(255,255,255,0.7)',fontSize:12,marginTop:8,fontWeight:600}}>{toastType==='capture'?'Keep running for more!':'Compete to take it back!'}</p>
         </div>
       )}
- 
+
       {showSummary && (
         <div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.9)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:9999,backdropFilter:'blur(10px)'}}>
           <div style={{background:'#111',border:'1px solid #2a2a2a',borderRadius:24,padding:32,maxWidth:360,width:'90%',textAlign:'center'}}>
@@ -549,9 +544,8 @@ export default function Map() {
           </div>
         </div>
       )}
- 
+
       <BottomNavigation />
     </div>
   );
 }
- 
