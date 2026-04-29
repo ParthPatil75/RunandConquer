@@ -28,51 +28,87 @@ interface RoadGraph {
   edges: Record<string, string[]>;
 }
 
-const segmentsIntersect = (p1: [number, number], p2: [number, number], p3: [number, number], p4: [number, number]): boolean => {
-  const d1 = [p2[0] - p1[0], p2[1] - p1[1]], d2 = [p4[0] - p3[0], p4[1] - p3[1]];
+// ─── GEOMETRY ────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the intersection point [lat,lng] of segments p1→p2 and p3→p4,
+ * or null if they don't cross (with a small epsilon buffer at endpoints).
+ */
+const getIntersectionPoint = (
+  p1: [number, number], p2: [number, number],
+  p3: [number, number], p4: [number, number]
+): [number, number] | null => {
+  const d1 = [p2[0] - p1[0], p2[1] - p1[1]];
+  const d2 = [p4[0] - p3[0], p4[1] - p3[1]];
   const cross = d1[0] * d2[1] - d1[1] * d2[0];
-  if (Math.abs(cross) < 1e-10) return false;
+  if (Math.abs(cross) < 1e-12) return null; // parallel
   const t = ((p3[0] - p1[0]) * d2[1] - (p3[1] - p1[1]) * d2[0]) / cross;
   const u = ((p3[0] - p1[0]) * d1[1] - (p3[1] - p1[1]) * d1[0]) / cross;
-  return t > 0.05 && t < 0.95 && u > 0.05 && u < 0.95;
+  // Use 0.02 / 0.98 — tighter endpoints to avoid corner-touch false positives
+  if (t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98) {
+    return [p1[0] + t * d1[0], p1[1] + t * d1[1]];
+  }
+  return null;
 };
 
-const findIntersectionIdx = (path: [number, number][]): number => {
-  if (path.length < 6) return -1;
-  const last = path[path.length - 1], prev = path[path.length - 2];
-  for (let i = 0; i < path.length - 5; i++) {
-    if (segmentsIntersect(prev, last, path[i], path[i + 1])) return i;
+/**
+ * Scans the last `window` points of the path for a self-intersection.
+ * Returns { idx, point } where idx is the earlier segment index and
+ * point is the exact crossing coordinate — or null.
+ */
+const findLoop = (
+  path: [number, number][],
+  window = 120
+): { idx: number; point: [number, number] } | null => {
+  if (path.length < 8) return null;
+  const slice = path.slice(-window);
+  const last = slice[slice.length - 1];
+  const prev = slice[slice.length - 2];
+  // Check new segment against all earlier segments except the 4 adjacent ones
+  for (let i = 0; i < slice.length - 5; i++) {
+    const pt = getIntersectionPoint(prev, last, slice[i], slice[i + 1]);
+    if (pt) return { idx: path.length - window + i, point: pt };
   }
-  return -1;
+  return null;
 };
 
-// Proximity loop: if end is close to an earlier point — close the loop
-const findProximityLoop = (path: [number, number][]): number => {
-  if (path.length < 10) return -1;
-  const last = path[path.length - 1];
-  for (let i = 0; i < path.length - 9; i++) {
-    const dx = last[0] - path[i][0];
-    const dy = last[1] - path[i][1];
-    if (Math.sqrt(dx * dx + dy * dy) < 0.0003) return i; // ~33 metres
+/** Haversine distance in metres between two lat/lng points */
+const haversine = (a: [number, number], b: [number, number]): number => {
+  const R = 6371000;
+  const dLat = (b[0] - a[0]) * Math.PI / 180;
+  const dLon = (b[1] - a[1]) * Math.PI / 180;
+  const x = Math.sin(dLat / 2) ** 2 +
+    Math.cos(a[0] * Math.PI / 180) * Math.cos(b[0] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+};
+
+/** Polygon area in m² via Shoelace (on lat/lng, approximate) */
+const polygonArea = (pts: [number, number][]): number => {
+  if (pts.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const j = (i + 1) % pts.length;
+    area += pts[i][1] * pts[j][0];
+    area -= pts[j][1] * pts[i][0];
   }
-  return -1;
+  // Convert degree² → m²  (1° lat ≈ 111 000 m)
+  return Math.abs(area / 2) * 111000 * 111000;
 };
 
 const toKey = (lat: number, lng: number) => `${lat.toFixed(5)},${lng.toFixed(5)}`;
 
-// FIX: Build a dense grid tightly around campus — bots make loops fast
+// ─── FALLBACK GRID ────────────────────────────────────────────────────────────
+
 function buildDenseGrid(): { nodes: Record<string, [number, number]>; edges: Record<string, string[]>; ways: RoadWay[] } {
   const nodes: Record<string, [number, number]> = {};
   const edges: Record<string, string[]> = {};
   const ways: RoadWay[] = [];
-  // 40x40 grid = very dense, bots loop quickly
   const steps = 40;
   const latStart = 18.489, lngStart = 74.019;
   const latEnd = 18.499, lngEnd = 74.031;
   const latStep = (latEnd - latStart) / steps;
   const lngStep = (lngEnd - lngStart) / steps;
 
-  // Horizontal roads
   for (let i = 0; i <= steps; i++) {
     const lat = latStart + i * latStep;
     const coords: [number, number][] = [];
@@ -92,7 +128,6 @@ function buildDenseGrid(): { nodes: Record<string, [number, number]>; edges: Rec
     ways.push({ id: i, coords });
   }
 
-  // Vertical roads
   for (let j = 0; j <= steps; j++) {
     const lng = lngStart + j * lngStep;
     const coords: [number, number][] = [];
@@ -114,24 +149,79 @@ function buildDenseGrid(): { nodes: Record<string, [number, number]>; edges: Rec
   return { nodes, edges, ways };
 }
 
+// ─── BOT STATE ────────────────────────────────────────────────────────────────
+
+interface BotState {
+  currentNode: string;
+  path: [number, number][];
+  visited: string[];       // last N nodes for recency check
+  target: string | null;   // current lookahead destination
+  steps: number;           // steps since last direction change
+}
+
+/**
+ * Pick the next node for a bot using a directional-bias random walk.
+ * Priority: 1) continue toward `target` if reachable
+ *           2) prefer unvisited neighbours
+ *           3) avoid immediate backtrack
+ *           4) random fallback
+ */
+const pickNextNode = (
+  bot: BotState,
+  edges: Record<string, string[]>,
+  nodes: Record<string, [number, number]>
+): { nextNode: string; newTarget: string | null } => {
+  const neighbours = (edges[bot.currentNode] || []).filter(n => nodes[n]);
+  if (!neighbours.length) return { nextNode: bot.currentNode, newTarget: null };
+
+  const lastNode = bot.visited.length >= 2 ? bot.visited[bot.visited.length - 2] : null;
+  const notBacktrack = neighbours.filter(n => n !== lastNode);
+  const candidates = notBacktrack.length ? notBacktrack : neighbours;
+
+  // Try to keep moving toward existing target for a few steps
+  if (bot.target && candidates.includes(bot.target) && bot.steps < 8) {
+    return { nextNode: bot.target, newTarget: bot.target };
+  }
+
+  // Prefer nodes not recently visited
+  const recentSet = new Set(bot.visited.slice(-20));
+  const fresh = candidates.filter(n => !recentSet.has(n));
+  const pool = fresh.length ? fresh : candidates;
+
+  // Among pool, pick the one that is most distant from current position (explore outward)
+  const cur = nodes[bot.currentNode];
+  let best = pool[0];
+  let bestDist = -1;
+  for (const n of pool) {
+    const d = haversine(cur, nodes[n]);
+    if (d > bestDist) { bestDist = d; best = n; }
+  }
+
+  return { nextNode: best, newTarget: best };
+};
+
+// ─── LOCATION TRACKER ────────────────────────────────────────────────────────
+
 function LocationTracker({ onLocation }: { onLocation: (pos: [number, number]) => void }) {
   const map = useMap();
   const hasLocated = useRef(false);
   useEffect(() => {
-    map.locate({ watch: true, enableHighAccuracy: true, maximumAge: 3000 });
+    map.locate({ watch: true, enableHighAccuracy: true, maximumAge: 2000 });
     map.on('locationfound', (e) => {
       if (e.accuracy > 5000) return;
       onLocation([e.latlng.lat, e.latlng.lng]);
       if (!hasLocated.current) {
-        map.panTo(e.latlng);
+        map.setView(e.latlng, 17);
         hasLocated.current = true;
       }
     });
-    map.on('locationerror', (e) => { console.log('GPS error:', e.message); });
+    map.on('locationerror', (e) => console.log('GPS error:', e.message));
     return () => { map.stopLocate(); };
   }, [map]);
   return null;
 }
+
+// ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
 
 export default function Map() {
   const navigate = useNavigate();
@@ -155,17 +245,21 @@ export default function Map() {
   const [summaryData, setSummaryData] = useState({ time: 0, dist: 0, zones: 0 });
   const [loadingStatus, setLoadingStatus] = useState('⏳ Loading campus roads...');
 
-  const watchIdRef = useRef<number | null>(null);
+  // Refs (survive re-renders inside setInterval)
   const currentNodeRef = useRef<string>('');
   const pathRef = useRef<[number, number][]>([]);
   const capturedRef = useRef(0);
+  const distanceRef = useRef(0);
   const userRef = useRef<User | null>(null);
   const graphRef = useRef<RoadGraph>({ nodes: {}, edges: {} });
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const botCurrentNodeRef = useRef<Record<string, string>>({});
-  const botPathsRef = useRef<Record<string, [number, number][]>>({});
-  const botVisitedRef = useRef<Record<string, string[]>>({});
-  const isRealRoads = useRef(false);
+  const botStatesRef = useRef<Record<string, BotState>>({});
+  const isRunningRef = useRef(false);
+  const gpsModeRef = useRef(false);
+  const territoriesRef = useRef<Territory[]>([]);
+
+  // Keep territoriesRef in sync
+  useEffect(() => { territoriesRef.current = territories; }, [territories]);
 
   useEffect(() => {
     const u = getCurrentUser();
@@ -174,17 +268,25 @@ export default function Map() {
     fetchRoads();
     const unsub = subscribeToTerritories((firebaseTerritories) => {
       setTerritories(current => {
-        const mine = current.filter(t => t.owner === userRef.current?.id);
-        const others = firebaseTerritories.filter(t => t.owner !== userRef.current?.id);
+        const myId = userRef.current?.id;
+        const mine = current.filter(t => t.owner === myId);
+        const others = firebaseTerritories.filter(t => t.owner !== myId);
         return [...mine, ...others];
       });
     });
     return () => unsub();
   }, [navigate]);
 
-  const applyRoadsAndBots = (ways: RoadWay[], nodes: Record<string, [number, number]>, edges: Record<string, string[]>) => {
+  // ── Road loading ─────────────────────────────────────────────────────────
+
+  const applyRoadsAndBots = (
+    ways: RoadWay[],
+    nodes: Record<string, [number, number]>,
+    edges: Record<string, string[]>
+  ) => {
     graphRef.current = { nodes, edges };
     setRoads(ways);
+    // Place three starter territories for the bots using actual road coords
     if (ways.length >= 3) {
       const makePolygon = (startIdx: number): [number, number][] => {
         const pts: [number, number][] = [];
@@ -200,36 +302,30 @@ export default function Map() {
       ]);
     }
     setRoadsLoaded(true);
+    setLoadingStatus('✅ Roads loaded!');
   };
 
   const fetchRoads = async (attempt = 1) => {
     try {
       setLoadingStatus(`⏳ Loading campus roads... (attempt ${attempt}/3)`);
       const query = `[out:json];way[highway](${BBOX});out geom;`;
-
-      // Try direct first, then proxy
       const urls = [
         `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`,
         `https://api.allorigins.win/get?url=${encodeURIComponent(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`)}`,
         `https://corsproxy.io/?${encodeURIComponent(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`)}`,
       ];
-
       const url = urls[(attempt - 1) % urls.length];
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
       const res = await fetch(url, { signal: controller.signal });
       clearTimeout(timeout);
-
       let data;
       const text = await res.text();
-      // Handle allorigins wrapper
       if (url.includes('allorigins')) {
-        const wrapper = JSON.parse(text);
-        data = JSON.parse(wrapper.contents);
+        data = JSON.parse(JSON.parse(text).contents);
       } else {
         data = JSON.parse(text);
       }
-
       if (!data.elements || data.elements.length === 0) throw new Error('No road data');
 
       const ways: RoadWay[] = [];
@@ -238,7 +334,7 @@ export default function Map() {
 
       for (const el of data.elements) {
         if (el.type !== 'way' || !el.geometry || el.geometry.length < 2) continue;
-        const coords: [number, number][] = el.geometry.map((g: any) => [g.lat, g.lon]);
+        const coords: [number, number][] = el.geometry.map((g: { lat: number; lon: number }) => [g.lat, g.lon] as [number, number]);
         ways.push({ id: el.id, coords });
         for (let i = 0; i < coords.length; i++) {
           const key = toKey(coords[i][0], coords[i][1]);
@@ -252,203 +348,212 @@ export default function Map() {
           }
         }
       }
-
-      isRealRoads.current = true;
-      console.log(`✅ Real roads loaded: ${ways.length} ways`);
+      console.log(`✅ Real roads loaded: ${ways.length} ways, ${Object.keys(nodes).length} nodes`);
       applyRoadsAndBots(ways, nodes, edges);
-
     } catch (e) {
       console.error(`Road fetch attempt ${attempt} failed:`, e);
       if (attempt < 3) {
         setTimeout(() => fetchRoads(attempt + 1), 2000);
       } else {
-        // Use dense fallback grid — bots will make loops quickly
         console.log('Using dense fallback grid');
         setLoadingStatus('✅ Ready (offline grid mode)');
         const { nodes, edges, ways } = buildDenseGrid();
-        isRealRoads.current = false;
         applyRoadsAndBots(ways, nodes, edges);
       }
     }
   };
 
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
   const findClosestNode = (target: [number, number]): string => {
-    const { nodes } = graphRef.current;
-    const keys = Object.keys(nodes).filter(k => graphRef.current.edges[k]?.length > 0);
-    if (!keys.length) return `${target[0]},${target[1]}`;
-    let best = keys[0]; let bestDist = Infinity;
+    const { nodes, edges } = graphRef.current;
+    const keys = Object.keys(nodes).filter(k => (edges[k]?.length ?? 0) > 0);
+    if (!keys.length) return toKey(target[0], target[1]);
+    let best = keys[0], bestDist = Infinity;
     for (const k of keys) {
-      const [la, ln] = nodes[k];
-      const d = Math.abs(la - target[0]) + Math.abs(ln - target[1]);
+      const d = haversine(target, nodes[k]);
       if (d < bestDist) { bestDist = d; best = k; }
     }
     return best;
   };
 
-  const handleCapture = (newPos: [number, number], path: [number, number][], ownerId: string, ownerName: string, color: string, isBot = false) => {
-    const sliced = path.slice(-80);
-    const idx = findIntersectionIdx(sliced) >= 0
-      ? findIntersectionIdx(sliced)
-      : findProximityLoop(sliced);
+  /** Try to detect and register a territory from a path. Returns true if captured. */
+  const tryCapture = (
+    path: [number, number][],
+    ownerId: string,
+    ownerName: string,
+    color: string,
+    isBot: boolean
+  ): boolean => {
+    const loop = findLoop(path);
+    if (!loop) return false;
 
-    if (idx >= 0) {
-      const poly = path.slice(-(sliced.length - idx)) as [number, number][];
-      if (poly.length >= 4) {
-        const newTerritory: Territory = {
-          id: `t_${ownerId}_${Date.now()}`,
-          owner: ownerId,
-          ownerName,
-          color,
-          polygon: poly,
-        };
-        setTerritories(t => [...t, newTerritory]);
+    // Build polygon from the crossing point onward + the exact intersection point
+    const poly: [number, number][] = [loop.point, ...path.slice(loop.idx + 1)];
 
-        if (!isBot) {
-          capturedRef.current += 1;
-          setCaptured(capturedRef.current);
-          setToastType('capture');
-          setToast(`🏆 Territory Captured! You own ${capturedRef.current} area${capturedRef.current > 1 ? 's' : ''}!`);
-          setTimeout(() => setToast(''), 3500);
-          pathRef.current = [newPos];
-          saveTerritoryToFirebase(newTerritory);
-        } else {
-          setToastType('warning');
-          setToast(`⚠️ ${ownerName} captured an area!`);
-          setTimeout(() => setToast(''), 2500);
-        }
-        return true;
-      }
+    // Reject tiny noise polygons (< 500 m²)
+    if (poly.length < 4 || polygonArea(poly) < 500) return false;
+
+    const newTerritory: Territory = {
+      id: `t_${ownerId}_${Date.now()}`,
+      owner: ownerId,
+      ownerName,
+      color,
+      polygon: poly,
+    };
+
+    setTerritories(t => [...t, newTerritory]);
+
+    if (!isBot) {
+      capturedRef.current += 1;
+      setCaptured(capturedRef.current);
+      setToastType('capture');
+      setToast(`🏆 Territory Captured! You own ${capturedRef.current} zone${capturedRef.current > 1 ? 's' : ''}!`);
+      setTimeout(() => setToast(''), 3500);
+      saveTerritoryToFirebase(newTerritory);
+    } else {
+      setToastType('warning');
+      setToast(`⚠️ ${ownerName} captured an area!`);
+      setTimeout(() => setToast(''), 2500);
     }
-    return false;
+    return true;
   };
+
+  // ── GPS tracking ─────────────────────────────────────────────────────────
 
   const handleGPSLocation = (pos: [number, number]) => {
     setMyLocation(pos);
-    if (!isRunning) return;
-    if (pathRef.current.length >= 1) {
-      const prev = pathRef.current[pathRef.current.length - 1];
-      const R = 6371000;
-      const dLat = (pos[0] - prev[0]) * Math.PI / 180;
-      const dLon = (pos[1] - prev[1]) * Math.PI / 180;
-      const a = Math.sin(dLat / 2) ** 2 + Math.cos(prev[0] * Math.PI / 180) * Math.cos(pos[0] * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-      const meters = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      if (meters < 8) return;
-      setDistance(d => d + meters / 1000);
+    if (!isRunningRef.current || gpsModeRef.current === false) return;
+
+    const prev = pathRef.current[pathRef.current.length - 1];
+    if (prev) {
+      const meters = haversine(prev, pos);
+      if (meters < 8) return; // filter jitter
+      const km = meters / 1000;
+      distanceRef.current += km;
+      setDistance(distanceRef.current);
     }
-    const newPath = [...pathRef.current, pos];
-    pathRef.current = newPath;
-    setRunPath([...newPath]);
+
+    pathRef.current = [...pathRef.current, pos];
+    setRunPath([...pathRef.current]);
+
     if (userRef.current) {
-      handleCapture(pos, newPath, userRef.current.id, userRef.current.name, PLAYER_COLOR, false);
+      const captured = tryCapture(pathRef.current, userRef.current.id, userRef.current.name, PLAYER_COLOR, false);
+      if (captured) {
+        // Reset path to just the last point so next loop starts fresh
+        pathRef.current = [pos];
+        setRunPath([pos]);
+      }
     }
   };
+
+  // ── Simulate loop ─────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (!isRunning || !startTime || gpsMode) return;
     const { edges, nodes } = graphRef.current;
+
+    // Spread bots across the road network
+    const allConnectedKeys = Object.keys(nodes).filter(k => (edges[k]?.length ?? 0) >= 2);
+    if (!allConnectedKeys.length) return;
+
+    const botIds = ['bot1', 'bot2', 'bot3'] as const;
     const botNames: Record<string, string> = { bot1: 'Alex', bot2: 'Sarah', bot3: 'Mike' };
 
-    // Init bots at well-connected nodes spread across the map
-    const allKeys = Object.keys(nodes).filter(k => edges[k] && edges[k].length >= 2);
-    if (allKeys.length > 0) {
-      ['bot1', 'bot2', 'bot3'].forEach((botId, i) => {
-        if (!botCurrentNodeRef.current[botId]) {
-          const startKey = allKeys[Math.floor((allKeys.length / 4) * (i + 1))];
-          botCurrentNodeRef.current[botId] = startKey;
-          botPathsRef.current[botId] = [nodes[startKey]];
-          botVisitedRef.current[botId] = [startKey];
-        }
-      });
+    botIds.forEach((botId, i) => {
+      if (!botStatesRef.current[botId]) {
+        const startKey = allConnectedKeys[Math.floor((allConnectedKeys.length / 4) * (i + 1))];
+        botStatesRef.current[botId] = {
+          currentNode: startKey,
+          path: [nodes[startKey]],
+          visited: [startKey],
+          target: null,
+          steps: 0,
+        };
+      }
+    });
+
+    // Player starting state
+    if (!currentNodeRef.current) {
+      const startNode = findClosestNode(CAMPUS_CENTER);
+      currentNodeRef.current = startNode;
+      pathRef.current = [nodes[startNode] || CAMPUS_CENTER];
     }
 
-    // FIX: 1500ms interval — bots move faster, loops form quicker
+    const TICK_MS = 800; // faster ticks, 1 move per tick = more natural
     const interval = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startTime) / 1000));
-      setDistance(p => p + 0.004);
 
-      // Move player — 3 steps per tick for faster path building
-      for (let step = 0; step < 3; step++) {
+      // ── Move player (simulate) ──
+      {
         const cur = currentNodeRef.current;
-        const neighbors = (edges[cur] || []).filter(n => nodes[n]);
-        if (neighbors.length) {
-          const next = neighbors[Math.floor(Math.random() * neighbors.length)];
+        const neighbours = (edges[cur] || []).filter(n => nodes[n]);
+        if (neighbours.length) {
+          // Simple player: random but prefer unvisited
+          const recentSet = new Set(pathRef.current.slice(-15).map(p => toKey(p[0], p[1])));
+          const fresh = neighbours.filter(n => !recentSet.has(n));
+          const pool = fresh.length ? fresh : neighbours;
+          const next = pool[Math.floor(Math.random() * pool.length)];
           const newPos: [number, number] = nodes[next];
-          if (newPos) {
-            const newPath = [...pathRef.current, newPos];
-            pathRef.current = newPath;
-            if (userRef.current) {
-              const captured = handleCapture(newPos, newPath, userRef.current.id, userRef.current.name, PLAYER_COLOR, false);
-              if (captured) break;
-            }
-            currentNodeRef.current = next;
+          pathRef.current = [...pathRef.current, newPos];
+          const didCapture = tryCapture(pathRef.current, userRef.current!.id, userRef.current!.name, PLAYER_COLOR, false);
+          if (didCapture) {
+            pathRef.current = [newPos];
           }
+          currentNodeRef.current = next;
+          distanceRef.current += haversine(nodes[cur] || CAMPUS_CENTER, newPos) / 1000;
+          setDistance(distanceRef.current);
+          setRunPath([...pathRef.current]);
         }
       }
-      setRunPath([...pathRef.current]);
 
-      // Move bots — 3 steps per tick
-      ['bot1', 'bot2', 'bot3'].forEach(botId => {
-        for (let step = 0; step < 3; step++) {
-          const curNode = botCurrentNodeRef.current[botId];
-          if (!curNode || !nodes[curNode]) return;
+      // ── Move bots ──
+      botIds.forEach(botId => {
+        const bot = botStatesRef.current[botId];
+        if (!bot) return;
 
-          const botNeighbors = (edges[curNode] || []).filter(n => nodes[n]);
-          if (!botNeighbors.length) return;
+        const { nextNode, newTarget } = pickNextNode(bot, edges, nodes);
+        if (!nodes[nextNode]) return;
 
-          // Natural movement — avoid backtrack, prefer fresh roads
-          const recentVisited = (botVisitedRef.current[botId] || []).slice(-10);
-          const lastNode = (botVisitedRef.current[botId] || []).slice(-2)[0];
-          const notBacktrack = botNeighbors.filter(n => n !== lastNode);
-          const fresh = notBacktrack.filter(n => !recentVisited.includes(n));
-          const nextNode = fresh.length > 0
-            ? fresh[Math.floor(Math.random() * fresh.length)]
-            : notBacktrack.length > 0
-              ? notBacktrack[Math.floor(Math.random() * notBacktrack.length)]
-              : botNeighbors[Math.floor(Math.random() * botNeighbors.length)];
+        const newPos: [number, number] = nodes[nextNode];
+        const newPath = [...bot.path, newPos];
+        const didCapture = tryCapture(newPath, botId, botNames[botId], BOT_COLORS[botId], true);
 
-          const nextPos = nodes[nextNode];
-          if (!nextPos) return;
+        botStatesRef.current[botId] = {
+          currentNode: nextNode,
+          path: didCapture ? [newPos] : newPath,
+          visited: [...bot.visited.slice(-40), nextNode],
+          target: didCapture ? null : newTarget,
+          steps: didCapture ? 0 : bot.steps + 1,
+        };
 
-          const currentBotPath = botPathsRef.current[botId] || [];
-          const newBotPath = [...currentBotPath, nextPos];
-          botPathsRef.current[botId] = newBotPath;
-          botCurrentNodeRef.current[botId] = nextNode;
-          botVisitedRef.current[botId] = [...(botVisitedRef.current[botId] || []).slice(-50), nextNode];
-
-          // Check capture
-          const captured = handleCapture(
-            nextPos, newBotPath,
-            botId, botNames[botId], BOT_COLORS[botId], true
-          );
-          if (captured) {
-            botPathsRef.current[botId] = [nextPos];
-            botVisitedRef.current[botId] = [nextNode];
-            break;
-          }
-        }
-        setBotTrails(prev => ({ ...prev, [botId]: (botPathsRef.current[botId] || []).slice(-60) }));
+        setBotTrails(prev => ({
+          ...prev,
+          [botId]: botStatesRef.current[botId].path.slice(-80),
+        }));
       });
-
-    }, 1500); // FIX: 1500ms — much faster than 3500ms
+    }, TICK_MS);
 
     timerRef.current = interval;
     return () => clearInterval(interval);
   }, [isRunning, startTime, gpsMode]);
 
+  // GPS-only timer
   useEffect(() => {
     if (!isRunning || !gpsMode || !startTime) return;
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - startTime) / 1000)), 1000);
     return () => clearInterval(t);
   }, [isRunning, gpsMode, startTime]);
 
+  // ── Start / Stop ─────────────────────────────────────────────────────────
+
   const startRun = (useGPS = false) => {
     const { nodes } = graphRef.current;
-    if (Object.keys(nodes).length === 0) {
+    if (!Object.keys(nodes).length) {
       setGpsError('Still loading — please wait a moment');
       return;
     }
-
-    // Keep initial bot territories
+    // Keep initial bot territories only
     setTerritories(t => t.filter(x => ['t1', 't2', 't3'].includes(x.id)));
 
     const startNode = findClosestNode(CAMPUS_CENTER);
@@ -457,17 +562,19 @@ export default function Map() {
     currentNodeRef.current = startNode;
     pathRef.current = [startPos];
     capturedRef.current = 0;
-    botCurrentNodeRef.current = {};
-    botPathsRef.current = {};
-    botVisitedRef.current = {};
+    distanceRef.current = 0;
+    botStatesRef.current = {};
+
     setBotTrails({});
     setIsRunning(true);
+    isRunningRef.current = true;
     setStartTime(Date.now());
     setRunPath([startPos]);
     setDistance(0);
     setElapsed(0);
     setCaptured(0);
     setGpsMode(useGPS);
+    gpsModeRef.current = useGPS;
     setGpsError('');
 
     if (useGPS && !navigator.geolocation) {
@@ -476,25 +583,36 @@ export default function Map() {
   };
 
   const stopRun = () => {
-    const fd = distance, ft = elapsed, fc = capturedRef.current;
-    setIsRunning(false); setRunPath([]); setBotTrails({});
-    if (watchIdRef.current !== null) { navigator.geolocation.clearWatch(watchIdRef.current); watchIdRef.current = null; }
+    const fd = distanceRef.current;
+    const ft = elapsed;
+    const fc = capturedRef.current;
+
+    setIsRunning(false);
+    isRunningRef.current = false;
+    setRunPath([]);
+    setBotTrails({});
     if (timerRef.current) clearInterval(timerRef.current);
     setGpsMode(false);
+    gpsModeRef.current = false;
+
     if (!userRef.current) return;
     const today = new Date().toDateString();
     const alreadyRanToday = (userRef.current.lastRunDate || '') === today;
-    const updated = {
+    const updated: User = {
       ...userRef.current,
       totalDistance: (userRef.current.totalDistance || 0) + fd,
       streak: alreadyRanToday ? userRef.current.streak : (userRef.current.streak || 0) + 1,
       lastRunDate: today,
     };
-    setUser(updated); userRef.current = updated; updateUser(updated);
+    setUser(updated);
+    userRef.current = updated;
+    updateUser(updated);
     setSummaryData({ time: ft, dist: fd, zones: fc });
     setShowSummary(true);
     setTimeout(() => setShowSummary(false), 6000);
   };
+
+  // ── UI helpers ────────────────────────────────────────────────────────────
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
   if (!user) return null;
@@ -513,13 +631,7 @@ export default function Map() {
         ))}
 
         {territories.map(t => (
-          <Polygon key={t.id} positions={t.polygon} pathOptions={{
-            color: t.color,
-            fillColor: t.color,
-            fillOpacity: 0.3,
-            opacity: 1,
-            weight: 3,
-          }} />
+          <Polygon key={t.id} positions={t.polygon} pathOptions={{ color: t.color, fillColor: t.color, fillOpacity: 0.3, opacity: 1, weight: 3 }} />
         ))}
 
         {Object.entries(botTrails).map(([botId, trail]) =>
@@ -530,15 +642,19 @@ export default function Map() {
         )}
 
         {myLocation && <Marker position={myLocation} />}
-        {runPath.length > 1 && <Polyline positions={runPath} pathOptions={{ color: PLAYER_COLOR, weight: 4, opacity: 0.9 }} />}
+        {runPath.length > 1 && (
+          <Polyline positions={runPath} pathOptions={{ color: PLAYER_COLOR, weight: 4, opacity: 0.9 }} />
+        )}
       </MapContainer>
 
+      {/* Loading overlay */}
       {!roadsLoaded && (
         <div style={{ position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)', zIndex: 9999, background: 'rgba(0,0,0,0.85)', color: 'white', padding: '10px 24px', borderRadius: 999, fontSize: 14 }}>
           {loadingStatus}
         </div>
       )}
 
+      {/* Start buttons */}
       {!isRunning && roadsLoaded && (
         <div style={{ position: 'absolute', top: 16, right: 16, zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 8 }}>
           <button onClick={() => startRun(false)} style={{ background: '#00FF87', color: 'black', fontWeight: 900, padding: '12px 20px', borderRadius: 16, border: 'none', cursor: 'pointer', fontSize: 14, fontFamily: "'Barlow Condensed',sans-serif" }}>▶ SIMULATE</button>
@@ -547,6 +663,7 @@ export default function Map() {
         </div>
       )}
 
+      {/* Run HUD */}
       {isRunning && (
         <div style={{ position: 'absolute', top: 16, left: 16, right: 16, zIndex: 9999 }}>
           <div style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 24, padding: 16 }}>
@@ -561,13 +678,14 @@ export default function Map() {
               <button onClick={stopRun} style={{ background: '#ef4444', color: 'white', fontWeight: 900, padding: '12px 24px', borderRadius: 16, border: 'none', cursor: 'pointer', fontSize: 14, fontFamily: "'Barlow Condensed',sans-serif" }}>STOP</button>
             </div>
             <p style={{ color: '#555', fontSize: 11, textAlign: 'center', marginTop: 8 }}>
-              {gpsMode ? '📍 GPS active — walk outside to draw territory' : '🛣️ Simulated — looping roads to capture'}
+              {gpsMode ? '📍 GPS active — walk outside to draw territory' : '🛣️ Simulated — bots racing on real roads'}
             </p>
             {gpsError && <p style={{ color: '#ef4444', fontSize: 11, textAlign: 'center', marginTop: 4 }}>{gpsError}</p>}
           </div>
         </div>
       )}
 
+      {/* Leaderboard strip */}
       <div style={{ position: 'absolute', bottom: 96, left: 16, right: 16, zIndex: 9999 }}>
         <div style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 16, padding: '12px 16px', display: 'flex', justifyContent: 'space-around', textAlign: 'center' }}>
           {[
@@ -584,13 +702,17 @@ export default function Map() {
         </div>
       </div>
 
+      {/* Toast */}
       {toast && (
         <div style={{ position: 'absolute', top: '33%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 9999, textAlign: 'center' }}>
           <div style={{ background: toastType === 'capture' ? '#00FF87' : '#FF6B6B', color: 'black', fontWeight: 900, padding: '16px 24px', borderRadius: 16, fontSize: 16, border: '3px solid white', whiteSpace: 'nowrap', fontFamily: "'Barlow Condensed',sans-serif" }}>{toast}</div>
-          <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 8, fontWeight: 600 }}>{toastType === 'capture' ? 'Keep running for more!' : 'Compete to take it back!'}</p>
+          <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: 12, marginTop: 8, fontWeight: 600 }}>
+            {toastType === 'capture' ? 'Keep running for more!' : 'Compete to take it back!'}
+          </p>
         </div>
       )}
 
+      {/* Run summary modal */}
       {showSummary && (
         <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, backdropFilter: 'blur(10px)' }}>
           <div style={{ background: '#111', border: '1px solid #2a2a2a', borderRadius: 24, padding: 32, maxWidth: 360, width: '90%', textAlign: 'center' }}>
